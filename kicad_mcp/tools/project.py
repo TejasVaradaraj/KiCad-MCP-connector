@@ -41,6 +41,14 @@ class SimpleResult(BaseModel):
     data: Optional[dict[str, Any]] = None
 
 
+class DesignRulesSummary(BaseModel):
+    available: bool
+    default_netclass: Optional[dict[str, Any]] = None
+    netclasses: list[dict[str, Any]] = Field(default_factory=list)
+    netclass_count: int = 0
+    message: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -136,6 +144,14 @@ def _text_variables_to_dict(tv) -> dict[str, str]:
     return result
 
 
+def _netclass_rule_view(data: dict[str, Any]) -> dict[str, Any]:
+    fields = (
+        "name", "track_width", "wire_width", "clearance", "bus_width",
+        "via_diameter", "via_drill", "diff_pair_width", "diff_pair_gap",
+    )
+    return {k: data[k] for k in fields if k in data}
+
+
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
@@ -175,6 +191,41 @@ def register_project_tools(mcp: MCPServer) -> None:
             )
             for i, nc in enumerate(classes)
         ]
+
+    @mcp.tool()
+    def project_get_design_rules_summary() -> DesignRulesSummary:
+        """
+        Return a normalized summary of project netclass design rules.
+
+        This tool highlights the default netclass and returns a compact,
+        comparison-friendly rule view for all classes.
+        """
+        try:
+            proj = _get_project()
+            classes = list(proj.get_net_classes())
+            normalized = [_netclass_rule_view(_netclass_to_dict(nc)) for nc in classes]
+
+            default_nc = None
+            for entry in normalized:
+                name = str(entry.get("name", ""))
+                if name.lower() in {"default", "netclass_default"}:
+                    default_nc = entry
+                    break
+            if default_nc is None and normalized:
+                default_nc = normalized[0]
+
+            return DesignRulesSummary(
+                available=True,
+                default_netclass=default_nc,
+                netclasses=normalized,
+                netclass_count=len(normalized),
+                message=f"Found {len(normalized)} netclass rule set(s).",
+            )
+        except Exception as e:
+            return DesignRulesSummary(
+                available=False,
+                message=f"Failed to read design rules: {e}",
+            )
 
     @mcp.tool()
     def project_get_text_variables() -> TextVariablesInfo:
