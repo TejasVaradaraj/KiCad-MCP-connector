@@ -46,7 +46,6 @@ HEADLESS_FILE_PATH: Optional[str] = os.environ.get("KICAD_MCP_FILE")
 class KiCadConnectionError(RuntimeError):
     """Raised when we cannot establish or use a KiCad connection."""
 
-
 def _create_kicad():
     """Create a new KiCad client instance from current config."""
     try:
@@ -56,27 +55,26 @@ def _create_kicad():
             "kicad-python is not installed. Run: uv add kicad-python"
         ) from e
 
-    kwargs = {
+    import inspect
+
+    wanted = {
         "client_name": CLIENT_NAME,
         "timeout_ms": TIMEOUT_MS,
         "headless": HEADLESS,
+        "socket_path": KICAD_SOCKET_PATH,
+        "kicad_token": KICAD_TOKEN,
+        "kicad_cli_path": KICAD_CLI_PATH,
+        "file_path": HEADLESS_FILE_PATH if HEADLESS else None,
     }
 
-    if KICAD_SOCKET_PATH:
-        kwargs["socket_path"] = KICAD_SOCKET_PATH
-    if KICAD_TOKEN:
-        kwargs["kicad_token"] = KICAD_TOKEN
-    if KICAD_CLI_PATH:
-        kwargs["kicad_cli_path"] = KICAD_CLI_PATH
-    if HEADLESS and HEADLESS_FILE_PATH:
-        kwargs["file_path"] = HEADLESS_FILE_PATH
+    params = inspect.signature(KiCad.__init__).parameters
+    kwargs = {
+        key: value
+        for key, value in wanted.items()
+        if value is not None and key in params
+    }
 
-    logger.info(
-        "Connecting to KiCad (headless=%s, timeout_ms=%s, client_name=%s)",
-        HEADLESS,
-        TIMEOUT_MS,
-        CLIENT_NAME,
-    )
+    logger.info("Connecting to KiCad with kwargs=%s", list(kwargs))
 
     try:
         kicad = KiCad(**kwargs)
@@ -84,11 +82,9 @@ def _create_kicad():
         raise KiCadConnectionError(
             f"Failed to connect to KiCad: {e}. "
             "Ensure KiCad is running with the API enabled "
-            "(Preferences → Plugins → Enable API server), "
-            "or set KICAD_MCP_HEADLESS=1 for headless mode."
+            "(Preferences → Plugins → Enable API server)."
         ) from e
 
-    # Light health check so we fail fast if the socket is dead.
     try:
         kicad.ping()
     except Exception as e:
@@ -97,8 +93,7 @@ def _create_kicad():
         except Exception:
             pass
         raise KiCadConnectionError(
-            f"Connected but ping failed: {e}. "
-            "Is the KiCad API server enabled and reachable?"
+            f"Connected but ping failed: {e}."
         ) from e
 
     logger.info("KiCad connection established.")

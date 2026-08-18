@@ -65,27 +65,25 @@ def register_kicad_core_tools(mcp: MCPServer) -> None:
         may have been lost. Returns whether KiCad is reachable, the running version,
         the API version the library was built against, and whether they match.
         """
+        kicad = get_kicad()
+        kicad.ping()
+        version = str(kicad.get_version())
+        api_version = str(kicad.get_api_version())
         try:
-            kicad = get_kicad()
-            kicad.ping()
-            version = str(kicad.get_version())
-            api_version = str(kicad.get_api_version())
-            match = kicad.check_version()
-
-            return KiCadStatus(
-                connected=True,
-                ping_ok=True,
-                version=version,
-                api_version=api_version,
-                version_match=match,
-                message="KiCad is reachable and responding.",
-            )
+            match = bool(kicad.check_version())
+            extra = ""
         except Exception as e:
-            return KiCadStatus(
-                connected=False,
-                ping_ok=False,
-                message=f"Failed to communicate with KiCad: {e}",
-            )
+            match = False
+            extra = f" Version check warning: {e}"
+
+        return KiCadStatus(
+            connected=True,
+            ping_ok=True,
+            version=version,
+            api_version=api_version,
+            version_match=match,
+            message="KiCad is reachable." + extra,
+        )
 
     @mcp.tool()
     def kicad_list_open_documents(
@@ -97,24 +95,54 @@ def register_kicad_core_tools(mcp: MCPServer) -> None:
         Parameters
         ----------
         doc_type:
-            Optional filter. Pass an integer document type if you only want
-            boards, schematics, etc. Omit to retrieve all open documents.
-            (Exact enum values come from the protobuf definitions; common ones
-            are board and schematic.)
-
-        Returns a list of open documents with basic identifying information.
+            Optional document type integer. If omitted, the tool queries
+            common types (PCB, then schematic) instead of type 0, which
+            KiCad rejects as unhandled.
         """
         kicad = get_kicad()
-        docs = kicad.get_open_documents(doc_type) if doc_type is not None else kicad.get_open_documents(0)
 
-        result = []
-        for doc in docs:
-            # DocumentSpecifier is a protobuf message – convert carefully
-            info = DocumentInfo(
-                raw=dict(doc) if hasattr(doc, "__iter__") else {"repr": str(doc)}
+        types_to_try: list[int] = []
+        if doc_type is not None and doc_type != 0:
+            types_to_try = [doc_type]
+        else:
+            # Discover official enum values when available; fall back to PCB=2, SCH=1
+            try:
+                from kipy.proto.common.types.base_types_pb2 import DocumentType
+                for name in ("DOCTYPE_PCB", "DOCTYPE_SCHEMATIC", "DOCTYPE_PROJECT"):
+                    if hasattr(DocumentType, name):
+                        types_to_try.append(int(getattr(DocumentType, name)))
+            except Exception:
+                types_to_try = [2, 1]  # typical PCB, schematic
+
+            if not types_to_try:
+                types_to_try = [2, 1]
+
+        result: list[DocumentInfo] = []
+        errors: list[str] = []
+        seen: set[str] = set()
+
+        for dtype in types_to_try:
+            try:
+                docs = kicad.get_open_documents(dtype)
+            except Exception as e:
+                errors.append(f"type {dtype}: {e}")
+                continue
+            for doc in docs:
+                key = str(doc)
+                if key in seen:
+                    continue
+                seen.add(key)
+                result.append(
+                    DocumentInfo(
+                        raw={"type": dtype, "specifier": key},
+                    )
+                )
+
+        if not result and errors:
+            raise RuntimeError(
+                "get_open_documents is not usable in this KiCad session: "
+                + "; ".join(errors)
             )
-            # Improve field extraction once we inspect the exact protobuf fields
-            result.append(info)
         return result
 
     @mcp.tool()
