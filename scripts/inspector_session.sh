@@ -8,8 +8,8 @@ mkdir -p "$LOG_DIR"
 STAMP="$(date +%Y-%m-%d_%H%M%S)"
 LOG_FILE="$LOG_DIR/${STAMP}_session.jsonl"
 
-# Same launch style Inspector already used for you
-SERVER=(uv run --with mcp=2.0.0 mcp run server.py)
+# Same launch style as scripts/smoke_tools.py
+SERVER=(uv run python server.py)
 
 call() {
   local method="$1"

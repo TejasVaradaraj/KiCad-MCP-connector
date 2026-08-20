@@ -1,0 +1,21 @@
+{
+  "convert_mm_to_nm": { "value_mm": 1.0 },
+  "convert_nm_to_mm": { "value_nm": 1000000 },
+  "convert_mils_to_nm": { "value_mils": 10 },
+  "convert_nm_to_mils": { "value_nm": 254000 },
+  "layer_from_name": { "name": "F.Cu" },
+  "layer_get_canonical_name": { "layer_id": 3 },
+  "geometry_distance": { "x1_mm": 0, "y1_mm": 0, "x2_mm": 3, "y2_mm": 4 },
+  "geometry_normalize_angle": { "degrees": 370 },
+  "geometry_arc_properties": {
+    "start_x_mm": 0, "start_y_mm": 0,
+    "mid_x_mm": 1, "mid_y_mm": 1,
+    "end_x_mm": 2, "end_y_mm": 0
+  },
+  "kicad_get_plugin_settings_path": { "identifier": "org.kicad.kicad-mcp" },
+  "kicad_get_binary_path": { "binary_name": "kicad-cli" },
+  "parse_library_id": { "full_id": "Device:R" },
+  "format_library_id": { "library": "Device", "name": "R" },
+  "project_expand_text_variables": { "text": "${TITLE} rev ${REVISION}" },
+  "expand_text_variables": { "text": "${TITLE}" }
+}
