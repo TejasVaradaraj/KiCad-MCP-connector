@@ -1,7 +1,7 @@
 [project]
 name = "kicad-mcp"
 version = "0.1.0"
-description = "Add your description here"
+description = "MCP server that talks to a running KiCad instance over the official IPC API."
 readme = "README.md"
 authors = [
     { name = "Tejasvi Varadaraj", email = "tejasvipradhyumna@gmail.com" }
@@ -19,3 +19,7 @@ kicad-mcp = "kicad_mcp:main"
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""
+
