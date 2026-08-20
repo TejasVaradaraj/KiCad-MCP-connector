@@ -1,8 +1,3 @@
-# kicad_mcp/tools/project.py
-"""
-MCP tools derived from kipy.project.Project.
-"""
-
 from __future__ import annotations
 
 from typing import Any, Optional
@@ -11,11 +6,7 @@ from mcp.server import MCPServer
 from pydantic import BaseModel, Field
 
 from kicad_mcp.connection import get_kicad
-
-
-# ---------------------------------------------------------------------------
-# Models
-# ---------------------------------------------------------------------------
+from kicad_mcp.helpers.documents import pcb_and_schematic_types
 
 class ProjectInfo(BaseModel):
     available: bool
@@ -23,39 +14,23 @@ class ProjectInfo(BaseModel):
     path: Optional[str] = None
     message: str = ""
 
-
 class NetClassInfo(BaseModel):
     name: str
     raw: dict[str, Any] = Field(default_factory=dict)
-
 
 class TextVariablesInfo(BaseModel):
     variables: dict[str, str] = Field(default_factory=dict)
     raw: dict[str, Any] = Field(default_factory=dict)
     message: str = ""
 
-
 class SimpleResult(BaseModel):
     success: bool
     message: str
     data: Optional[dict[str, Any]] = None
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def _get_project():
-    """
-    Obtain a Project object.
-
-    Preference order:
-    1. From the currently open board (most common case)
-    2. From open documents via KiCad.get_project()
-    """
     kicad = get_kicad()
 
-    # 1. Prefer board → project
     try:
         board = kicad.get_board()
         if board is not None:
@@ -65,17 +40,18 @@ def _get_project():
     except Exception:
         pass
 
-    # 2. Fall back to open documents
-    try:
-        # doc_type 0 is a common "any"/unspecified filter in practice;
-        # adjust if your binding exposes a proper enum.
-        docs = list(kicad.get_open_documents(0))
-        if not docs:
-            raise RuntimeError("No open documents found.")
-        return kicad.get_project(docs[0])
-    except Exception as e:
-        raise RuntimeError(f"Could not obtain Project: {e}") from e
-
+    last_error: Exception | None = None
+    for dtype in pcb_and_schematic_types():
+        try:
+            docs = list(kicad.get_open_documents(dtype))
+            if docs:
+                return kicad.get_project(docs[0])
+        except Exception as e:
+            last_error = e
+            continue
+    raise RuntimeError(
+        f"Could not obtain Project: {last_error or 'no open PCB/schematic documents'}"
+    )
 
 def _netclass_to_dict(nc) -> dict[str, Any]:
     data: dict[str, Any] = {}
@@ -91,18 +67,11 @@ def _netclass_to_dict(nc) -> dict[str, Any]:
                 pass
     if not data:
         data["repr"] = str(nc)[:300]
-    # Ensure name key exists
     if "name" not in data:
         data["name"] = getattr(nc, "name", str(nc))
     return data
 
-
 def _text_variables_to_dict(tv) -> dict[str, str]:
-    """
-    Best-effort conversion of TextVariables to a plain dict[str, str].
-    The exact shape of TextVariables is lightly documented, so we try
-    several common patterns.
-    """
     result: dict[str, str] = {}
 
     # Pattern 1: mapping-like
@@ -134,11 +103,6 @@ def _text_variables_to_dict(tv) -> dict[str, str]:
     # Pattern 3: fallback
     result["_raw"] = str(tv)[:500]
     return result
-
-
-# ---------------------------------------------------------------------------
-# Tools
-# ---------------------------------------------------------------------------
 
 def register_project_tools(mcp: MCPServer) -> None:
 
@@ -276,5 +240,21 @@ def register_project_tools(mcp: MCPServer) -> None:
                 message="Expanded using project variables.",
                 data={"original": text, "expanded": expanded},
             )
-        except Exception as e:
-            return SimpleResult(success=False, message=str(e))
+        except Exception as project_error:
+            try:
+                kicad = get_kicad()
+                board = kicad.get_board()
+                if board is None:
+                    raise project_error
+                expanded = board.expand_text_variables(text)
+                return SimpleResult(
+                    success=True,
+                    message="Expanded using the open board (project document was not usable).",
+                    data={
+                        "original": text,
+                        "expanded": expanded,
+                        "fallback": str(project_error),
+                    },
+                )
+            except Exception as e:
+                return SimpleResult(success=False, message=str(e))

@@ -1,24 +1,12 @@
-# kicad_mcp/tools/board.py
-"""
-MCP tools derived from kipy.board.Board.
-
-Focus: high-signal operations an agent actually needs.
-Low-level 1:1 wrappers are avoided on purpose.
-"""
-
 from __future__ import annotations
 
-from typing import Any, Literal, Optional, Sequence
+from typing import Any, Optional
 
 from mcp.server import MCPServer
 from pydantic import BaseModel, Field
 
 from kicad_mcp.connection import get_kicad
-
-
-# ---------------------------------------------------------------------------
-# Response models
-# ---------------------------------------------------------------------------
+from kicad_mcp.helpers.layers import nonzero_layer_ids
 
 class BoardInfo(BaseModel):
     name: str
@@ -27,13 +15,10 @@ class BoardInfo(BaseModel):
     title_block: Optional[dict[str, Any]] = None
     message: str = ""
 
-
 class BoardItemSummary(BaseModel):
-    """Lightweight summary so we don't dump huge objects into context."""
     count: int
     items: list[dict[str, Any]] = Field(default_factory=list)
     message: str = ""
-
 
 class LayerInfo(BaseModel):
     copper_layer_count: int
@@ -42,23 +27,16 @@ class LayerInfo(BaseModel):
     active_layer: Optional[int] = None
     layer_names: dict[int, str] = Field(default_factory=dict)
 
-
 class ExportResult(BaseModel):
     success: bool
     output_path: str
     message: str
     details: Optional[dict[str, Any]] = None
 
-
 class SimpleResult(BaseModel):
     success: bool
     message: str
     data: Optional[dict[str, Any]] = None
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _get_board():
     kicad = get_kicad()
@@ -67,35 +45,72 @@ def _get_board():
         raise RuntimeError("No board is currently open in KiCad.")
     return board
 
+def _field_text(obj: Any, field_name: str) -> Optional[str]:
+    try:
+        field = getattr(obj, field_name, None)
+        if field is None:
+            return None
+        if hasattr(field, "value") and not callable(field.value):
+            val = field.value
+            if isinstance(val, str):
+                return val
+        text = getattr(field, "text", None)
+        if text is not None:
+            val = getattr(text, "value", None)
+            if val is not None:
+                return str(val)
+    except Exception:
+        return None
+    return None
+
+def _title_block_dict(tb: Any) -> dict[str, Any]:
+    if tb is None:
+        return {}
+    comments: dict[int, str] = {}
+    try:
+        raw = getattr(tb, "comments", None)
+        if isinstance(raw, dict):
+            comments = {int(k): str(v) for k, v in raw.items() if v}
+    except Exception:
+        pass
+    return {
+        "title": getattr(tb, "title", None) or None,
+        "date": getattr(tb, "date", None) or None,
+        "revision": getattr(tb, "revision", None) or None,
+        "company": getattr(tb, "company", None) or None,
+        "comments": comments,
+    }
 
 def _safe_summary(obj: Any, max_fields: int = 12) -> dict[str, Any]:
     """Best-effort conversion of kicad objects into plain dicts for the LLM."""
     if obj is None:
         return {}
-    data = {}
-    # Common useful attributes across many board items
-    for attr in ("name", "net", "layer", "position", "orientation", "uuid", "kiid", "value", "reference"):
-        if hasattr(obj, attr):
-            try:
-                val = getattr(obj, attr)
-                data[attr] = str(val) if not isinstance(val, (int, float, bool, str, type(None))) else val
-            except Exception:
-                pass
-    # Fallback
+    data: dict[str, Any] = {}
+    ref = _field_text(obj, "reference_field")
+    if ref:
+        data["reference"] = ref
+    value = _field_text(obj, "value_field")
+    if value:
+        data["value"] = value
+    for attr in ("name", "net", "layer", "position", "orientation", "uuid", "kiid", "id"):
+        if attr in data or not hasattr(obj, attr):
+            continue
+        try:
+            val = getattr(obj, attr)
+            if attr == "net" and val is not None:
+                data["net"] = getattr(val, "name", str(val))
+            elif isinstance(val, (int, float, bool, str, type(None))):
+                data[attr] = val
+            else:
+                data[attr] = str(val)
+        except Exception:
+            pass
     if not data:
         data["repr"] = str(obj)[:300]
     return data
 
-
-# ---------------------------------------------------------------------------
-# Tools
-# ---------------------------------------------------------------------------
-
 def register_board_tools(mcp: MCPServer) -> None:
 
-    # ------------------------------------------------------------------
-    # 1. Board overview
-    # ------------------------------------------------------------------
     @mcp.tool()
     def board_get_info() -> BoardInfo:
         """
@@ -108,8 +123,7 @@ def register_board_tools(mcp: MCPServer) -> None:
             board = _get_board()
             title = None
             try:
-                tb = board.get_title_block_info()
-                title = _safe_summary(tb)
+                title = _title_block_dict(board.get_title_block_info())
             except Exception:
                 pass
 
@@ -129,9 +143,6 @@ def register_board_tools(mcp: MCPServer) -> None:
         except Exception as e:
             return BoardInfo(name="", available=False, message=str(e))
 
-    # ------------------------------------------------------------------
-    # 2. Item discovery (the most important group)
-    # ------------------------------------------------------------------
     @mcp.tool()
     def board_list_footprints(limit: int = 50) -> BoardItemSummary:
         """
@@ -204,8 +215,7 @@ def register_board_tools(mcp: MCPServer) -> None:
         inspecting a particular signal.
         """
         board = _get_board()
-        # First find the Net object
-        nets = {str(n): n for n in board.get_nets()}
+        nets = {getattr(n, "name", str(n)): n for n in board.get_nets()}
         if net_name not in nets:
             return BoardItemSummary(count=0, message=f"Net '{net_name}' not found.")
 
@@ -217,9 +227,6 @@ def register_board_tools(mcp: MCPServer) -> None:
             message=f"Found {len(items_raw)} items on net '{net_name}'.",
         )
 
-    # ------------------------------------------------------------------
-    # 3. Layers & Stackup
-    # ------------------------------------------------------------------
     @mcp.tool()
     def board_get_layers() -> LayerInfo:
         """
@@ -228,9 +235,13 @@ def register_board_tools(mcp: MCPServer) -> None:
         """
         board = _get_board()
         copper = board.get_copper_layer_count()
-        enabled = list(board.get_enabled_layers())
-        visible = list(board.get_visible_layers())
+        enabled = nonzero_layer_ids(board.get_enabled_layers())
+        visible = nonzero_layer_ids(board.get_visible_layers())
         active = board.get_active_layer()
+        try:
+            active = int(active) if active else None
+        except Exception:
+            pass
 
         names = {}
         for layer in enabled:
@@ -258,9 +269,6 @@ def register_board_tools(mcp: MCPServer) -> None:
         # Best-effort serialization
         return {"stackup": _safe_summary(stackup), "raw": str(stackup)[:2000]}
 
-    # ------------------------------------------------------------------
-    # 4. Important operations
-    # ------------------------------------------------------------------
     @mcp.tool()
     def board_refill_zones(block: bool = True) -> SimpleResult:
         """
@@ -276,16 +284,26 @@ def register_board_tools(mcp: MCPServer) -> None:
     @mcp.tool()
     def board_save() -> SimpleResult:
         """Save the current board to its existing file."""
-        board = _get_board()
-        board.save()
-        return SimpleResult(success=True, message="Board saved.")
+        try:
+            board = _get_board()
+            board.save()
+            return SimpleResult(success=True, message="Board saved.")
+        except Exception as e:
+            return SimpleResult(success=False, message=str(e))
 
     @mcp.tool()
-    def board_save_as(path: str) -> SimpleResult:
-        """Save the current board to a new path."""
-        board = _get_board()
-        board.save_as(path)
-        return SimpleResult(success=True, message=f"Board saved as {path}.")
+    def board_save_as(path: str, overwrite: bool = False) -> SimpleResult:
+        """
+        Save a copy of the current board to a new path.
+
+        The file must not already exist unless overwrite=True.
+        """
+        try:
+            board = _get_board()
+            board.save_as(path, overwrite=overwrite)
+            return SimpleResult(success=True, message=f"Board saved as {path}.")
+        except Exception as e:
+            return SimpleResult(success=False, message=str(e))
 
     @mcp.tool()
     def board_import_netlist(
@@ -312,67 +330,91 @@ def register_board_tools(mcp: MCPServer) -> None:
             data=_safe_summary(result),
         )
 
-    # ------------------------------------------------------------------
-    # 5. Exports (most common ones + a flexible entry point)
-    # ------------------------------------------------------------------
-    @mcp.tool()
-    def board_export_gerbers(output_path: str, layers: list[int]) -> ExportResult:
-        """
-        Export Gerber files for the given copper/technical layers.
+    def _export(kind: str, output_path: str, layers: Optional[list[int]] = None) -> ExportResult:
+        from kicad_mcp.helpers.cli import KiCadCliError, export_with_cli
 
-        `layers` should be a list of layer IDs (use board_get_layers first
-        to discover valid IDs).
-        """
         board = _get_board()
-        result = board.export_gerbers(output_path, layers)
-        return ExportResult(
-            success=True,
-            output_path=output_path,
-            message="Gerbers exported.",
-            details=_safe_summary(result),
-        )
+        ipc_name = {
+            "gerbers": "export_gerbers",
+            "drill": "export_drill",
+            "pos": "export_position",
+            "pdf": "export_pdf",
+        }[kind]
+        if hasattr(board, ipc_name):
+            try:
+                method = getattr(board, ipc_name)
+                if kind == "gerbers":
+                    result = method(output_path, layers or [])
+                elif kind == "drill":
+                    result = method(output_path)
+                else:
+                    result = method(output_path)
+                return ExportResult(
+                    success=True,
+                    output_path=output_path,
+                    message=f"{kind} exported via IPC.",
+                    details=_safe_summary(result),
+                )
+            except Exception as ipc_error:
+                ipc_msg = str(ipc_error)
+        else:
+            ipc_msg = f"Board.{ipc_name} is not in this kicad-python"
+
+        try:
+            details = export_with_cli(kind, output_path, layers)
+            details["ipc"] = ipc_msg
+            return ExportResult(
+                success=True,
+                output_path=output_path,
+                message=f"{kind} exported via kicad-cli (IPC plotting is KiCad 11+).",
+                details=details,
+            )
+        except KiCadCliError as e:
+            return ExportResult(
+                success=False,
+                output_path=output_path,
+                message=str(e),
+                details={"ipc": ipc_msg},
+            )
+        except Exception as e:
+            return ExportResult(
+                success=False,
+                output_path=output_path,
+                message=f"Export failed: {e}",
+                details={"ipc": ipc_msg},
+            )
+
+    @mcp.tool()
+    def board_export_gerbers(
+        output_path: str,
+        layers: Optional[list[int]] = None,
+    ) -> ExportResult:
+        """
+        Export Gerber files.
+
+        KiCad 9/10 has no IPC plotting; this calls kicad-cli on a snapshot of
+        the open board. `output_path` is a directory. `layers` is optional
+        (IPC layer IDs from board_get_layers; F.Cu is 3, not 0).
+        """
+        return _export("gerbers", output_path, layers)
 
     @mcp.tool()
     def board_export_drill(output_path: str, format: int = 1) -> ExportResult:
-        """Export NC drill files."""
-        board = _get_board()
-        result = board.export_drill(output_path, format=format)
-        return ExportResult(
-            success=True,
-            output_path=output_path,
-            message="Drill files exported.",
-            details=_safe_summary(result),
-        )
+        """Export NC drill files via kicad-cli (IPC plotting is KiCad 11+). `output_path` is a directory."""
+        return _export("drill", output_path)
 
     @mcp.tool()
     def board_export_position_file(
         output_path: str,
     ) -> ExportResult:
-        """Export pick-and-place (position) file."""
-        board = _get_board()
-        result = board.export_position(output_path)
-        return ExportResult(
-            success=True,
-            output_path=output_path,
-            message="Position file exported.",
-            details=_safe_summary(result),
-        )
+        """Export pick-and-place file via kicad-cli (IPC plotting is KiCad 11+)."""
+        return _export("pos", output_path)
 
     @mcp.tool()
     def board_export_pdf(output_path: str) -> ExportResult:
-        """Export a PDF plot of the board."""
-        board = _get_board()
-        result = board.export_pdf(output_path)
-        return ExportResult(
-            success=True,
-            output_path=output_path,
-            message="PDF exported.",
-            details=_safe_summary(result),
-        )
+        """Export a PDF plot via kicad-cli (IPC plotting is KiCad 11+)."""
+        return _export("pdf", output_path)
 
-    # ------------------------------------------------------------------
-    # 6. Selection (kept small – useful for interactive agent workflows)
-    # ------------------------------------------------------------------
     @mcp.tool()
     def board_get_selection() -> BoardItemSummary:
         """Return the items currently selected in the KiCad PCB editor."""

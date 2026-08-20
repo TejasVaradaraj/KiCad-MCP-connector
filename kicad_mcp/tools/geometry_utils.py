@@ -1,10 +1,3 @@
-# kicad_mcp/tools/geometry_utils.py
-"""
-MCP tools derived from kipy.geometry and kipy.util.*
-
-These are calculation / conversion helpers. They do not require an open board.
-"""
-
 from __future__ import annotations
 
 from typing import Any, Optional
@@ -14,28 +7,20 @@ from pydantic import BaseModel, Field
 
 from kicad_mcp.helpers.units import mm_to_nm, nm_to_mm, mils_to_nm, nm_to_mils
 
-
-# ---------------------------------------------------------------------------
-# Response models
-# ---------------------------------------------------------------------------
-
 class PointMM(BaseModel):
     x: float
     y: float
-
 
 class UnitConversionResult(BaseModel):
     value: float
     unit: str
     message: str = ""
 
-
 class LayerInfo(BaseModel):
     layer_id: int
     canonical_name: str
     is_copper: bool
     message: str = ""
-
 
 class ArcCalcResult(BaseModel):
     success: bool
@@ -46,12 +31,10 @@ class ArcCalcResult(BaseModel):
     angle_deg: Optional[float] = None
     message: str = ""
 
-
 class DistanceResult(BaseModel):
     distance_mm: float
     dx_mm: float
     dy_mm: float
-
 
 class AngleResult(BaseModel):
     degrees: float
@@ -59,16 +42,8 @@ class AngleResult(BaseModel):
     normalized_0_360: float
     normalized_pm180: float
 
-
-# ---------------------------------------------------------------------------
-# Tools
-# ---------------------------------------------------------------------------
-
 def register_geometry_utils_tools(mcp: MCPServer) -> None:
 
-    # ------------------------------------------------------------------
-    # Unit conversion
-    # ------------------------------------------------------------------
     @mcp.tool()
     def convert_mm_to_nm(value_mm: float) -> UnitConversionResult:
         """
@@ -101,14 +76,11 @@ def register_geometry_utils_tools(mcp: MCPServer) -> None:
         return UnitConversionResult(value=mils, unit="mils",
                                     message=f"{value_nm} nm = {mils} mils")
 
-    # ------------------------------------------------------------------
-    # Layer helpers (very frequently needed)
-    # ------------------------------------------------------------------
     @mcp.tool()
     def layer_get_canonical_name(layer_id: int) -> LayerInfo:
         """
         Return the canonical name of a board layer ID
-        (e.g. 0 → "F.Cu", 31 → "B.Cu", etc.).
+        (e.g. 3 → "F.Cu", 34 → "B.Cu"). Layer 0 is BL_UNKNOWN, not F.Cu.
         """
         from kipy.util.board_layer import canonical_name, is_copper_layer
 
@@ -175,9 +147,6 @@ def register_geometry_utils_tools(mcp: MCPServer) -> None:
                 result.append({"layer_id": layer_id, "canonical_name": str(layer_id)})
         return result
 
-    # ------------------------------------------------------------------
-    # Geometry calculations
-    # ------------------------------------------------------------------
     @mcp.tool()
     def geometry_distance(
         x1_mm: float, y1_mm: float,

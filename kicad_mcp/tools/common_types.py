@@ -1,11 +1,3 @@
-# kicad_mcp/tools/common_types.py
-"""
-MCP tools derived from kipy.common_types.
-
-Most types here are data structures. We only expose high-value
-operations (title block, library IDs, light text helpers).
-"""
-
 from __future__ import annotations
 
 from typing import Any, Optional
@@ -15,11 +7,6 @@ from pydantic import BaseModel, Field
 
 from kicad_mcp.connection import get_kicad
 
-
-# ---------------------------------------------------------------------------
-# Models
-# ---------------------------------------------------------------------------
-
 class TitleBlock(BaseModel):
     title: Optional[str] = None
     date: Optional[str] = None
@@ -28,13 +15,11 @@ class TitleBlock(BaseModel):
     comments: dict[int, str] = Field(default_factory=dict)
     message: str = ""
 
-
 class LibraryId(BaseModel):
     library: str
     name: str
     full: str
     message: str = ""
-
 
 class TextInfo(BaseModel):
     value: str
@@ -45,16 +30,10 @@ class TextInfo(BaseModel):
     italic: Optional[bool] = None
     raw: dict[str, Any] = Field(default_factory=dict)
 
-
 class SimpleResult(BaseModel):
     success: bool
     message: str
     data: Optional[dict[str, Any]] = None
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _board():
     kicad = get_kicad()
@@ -62,7 +41,6 @@ def _board():
     if board is None:
         raise RuntimeError("No board is currently open in KiCad.")
     return board
-
 
 def _title_block_to_model(tb) -> TitleBlock:
     comments = {}
@@ -81,16 +59,8 @@ def _title_block_to_model(tb) -> TitleBlock:
         message="Title block retrieved.",
     )
 
-
-# ---------------------------------------------------------------------------
-# Tools
-# ---------------------------------------------------------------------------
-
 def register_common_types_tools(mcp: MCPServer) -> None:
 
-    # ------------------------------------------------------------------
-    # Title block (high value)
-    # ------------------------------------------------------------------
     @mcp.tool()
     def board_get_title_block() -> TitleBlock:
         """
@@ -149,9 +119,6 @@ def register_common_types_tools(mcp: MCPServer) -> None:
         except Exception as e:
             return SimpleResult(success=False, message=str(e))
 
-    # ------------------------------------------------------------------
-    # LibraryIdentifier helpers
-    # ------------------------------------------------------------------
     @mcp.tool()
     def parse_library_id(full_id: str) -> LibraryId:
         """
@@ -183,9 +150,6 @@ def register_common_types_tools(mcp: MCPServer) -> None:
         full = f"{library}:{name}"
         return LibraryId(library=library, name=name, full=full, message=f"Formatted as '{full}'.")
 
-    # ------------------------------------------------------------------
-    # Text helpers (light)
-    # ------------------------------------------------------------------
     @mcp.tool()
     def board_list_text(limit: int = 40) -> list[dict[str, Any]]:
         """

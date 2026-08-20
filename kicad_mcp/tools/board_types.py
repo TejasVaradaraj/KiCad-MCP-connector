@@ -1,11 +1,3 @@
-# kicad_mcp/tools/board_types.py
-"""
-MCP tools focused on Board Types (FootprintInstance, Track, Via, Zone, Net, etc.).
-
-These tools sit on top of the Board methods (create_items / update_items / remove_items)
-and the rich type wrappers.
-"""
-
 from __future__ import annotations
 
 from typing import Any, Optional, Sequence
@@ -14,24 +6,8 @@ from mcp.server import MCPServer
 from pydantic import BaseModel, Field
 
 from kicad_mcp.connection import get_kicad
-
-
-# ---------------------------------------------------------------------------
-# Units helper (KiCad IPC uses nanometers)
-# ---------------------------------------------------------------------------
-
-NM_PER_MM = 1_000_000
-
-def mm_to_nm(mm: float) -> int:
-    return int(round(mm * NM_PER_MM))
-
-def nm_to_mm(nm: int | float) -> float:
-    return float(nm) / NM_PER_MM
-
-
-# ---------------------------------------------------------------------------
-# Response models
-# ---------------------------------------------------------------------------
+from kicad_mcp.helpers.layers import F_CU
+from kicad_mcp.helpers.units import mm_to_nm, nm_to_mm
 
 class ItemDetail(BaseModel):
     success: bool
@@ -39,22 +15,15 @@ class ItemDetail(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
     message: str = ""
 
-
 class MutationResult(BaseModel):
     success: bool
     message: str
     affected_count: int = 0
     details: Optional[dict[str, Any]] = None
 
-
 class SimpleResult(BaseModel):
     success: bool
     message: str
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
 
 def _board():
     kicad = get_kicad()
@@ -63,24 +32,37 @@ def _board():
         raise RuntimeError("No board is currently open in KiCad.")
     return board
 
+def _footprint_reference(fp) -> Optional[str]:
+    try:
+        field = getattr(fp, "reference_field", None)
+        if field is None:
+            return None
+        text = getattr(field, "text", None)
+        if text is None:
+            return None
+        val = getattr(text, "value", None)
+        return str(val) if val is not None else None
+    except Exception:
+        return None
 
 def _find_footprint_by_ref(board, reference: str):
     for fp in board.get_footprints():
-        try:
-            ref = fp.reference_field.value if hasattr(fp, "reference_field") else None
-            if ref == reference:
-                return fp
-        except Exception:
-            continue
+        if _footprint_reference(fp) == reference:
+            return fp
     return None
-
 
 def _summarize_footprint(fp) -> dict[str, Any]:
     data: dict[str, Any] = {}
     try:
         data["id"] = str(getattr(fp, "id", ""))
-        data["reference"] = getattr(fp.reference_field, "value", None) if hasattr(fp, "reference_field") else None
-        data["value"] = getattr(fp.value_field, "value", None) if hasattr(fp, "value_field") else None
+        ref_field = getattr(fp, "reference_field", None)
+        val_field = getattr(fp, "value_field", None)
+        if ref_field is not None:
+            text = getattr(ref_field, "text", None)
+            data["reference"] = getattr(text, "value", None) if text is not None else None
+        if val_field is not None:
+            text = getattr(val_field, "text", None)
+            data["value"] = getattr(text, "value", None) if text is not None else None
         data["layer"] = getattr(fp, "layer", None)
         data["locked"] = getattr(fp, "locked", None)
 
@@ -98,7 +80,6 @@ def _summarize_footprint(fp) -> dict[str, Any]:
     except Exception as e:
         data["error"] = str(e)
     return data
-
 
 def _summarize_track(t) -> dict[str, Any]:
     data: dict[str, Any] = {"type": type(t).__name__}
@@ -125,7 +106,6 @@ def _summarize_track(t) -> dict[str, Any]:
         data["error"] = str(e)
     return data
 
-
 def _summarize_via(v) -> dict[str, Any]:
     data: dict[str, Any] = {}
     try:
@@ -146,7 +126,6 @@ def _summarize_via(v) -> dict[str, Any]:
         data["error"] = str(e)
     return data
 
-
 def _summarize_zone(z) -> dict[str, Any]:
     data: dict[str, Any] = {}
     try:
@@ -164,16 +143,8 @@ def _summarize_zone(z) -> dict[str, Any]:
         data["error"] = str(e)
     return data
 
-
-# ---------------------------------------------------------------------------
-# Tools
-# ---------------------------------------------------------------------------
-
 def register_board_types_tools(mcp: MCPServer) -> None:
 
-    # ------------------------------------------------------------------
-    # Deep inspection
-    # ------------------------------------------------------------------
     @mcp.tool()
     def board_get_footprint(reference: str) -> ItemDetail:
         """
@@ -227,9 +198,6 @@ def register_board_types_tools(mcp: MCPServer) -> None:
             message=f"Net '{net_name}' has {len(items)} connected items.",
         )
 
-    # ------------------------------------------------------------------
-    # Footprint mutation (most common agent need)
-    # ------------------------------------------------------------------
     @mcp.tool()
     def board_move_footprint(
         reference: str,
@@ -298,9 +266,6 @@ def register_board_types_tools(mcp: MCPServer) -> None:
             board.drop_commit(commit)
             return MutationResult(success=False, message=str(e))
 
-    # ------------------------------------------------------------------
-    # Track & Via creation (high value, relatively simple objects)
-    # ------------------------------------------------------------------
     @mcp.tool()
     def board_create_track(
         start_x_mm: float,
@@ -308,14 +273,15 @@ def register_board_types_tools(mcp: MCPServer) -> None:
         end_x_mm: float,
         end_y_mm: float,
         width_mm: float = 0.25,
-        layer: int = 0,          # usually F.Cu – caller should use board_get_layers
+        layer: int = F_CU,
         net_name: Optional[str] = None,
     ) -> MutationResult:
         """
         Create a straight copper track between two points.
 
         All coordinates and width are in millimeters.
-        `layer` is the integer layer ID (use board_get_layers to discover values).
+        `layer` is the IPC layer ID (F.Cu is 3, not 0). Use board_get_layers
+        or layer_from_name to discover values.
         """
         from kipy.board_types import Track
         from kipy.geometry import Vector2
@@ -390,9 +356,6 @@ def register_board_types_tools(mcp: MCPServer) -> None:
             board.drop_commit(commit)
             return MutationResult(success=False, message=f"Failed to create via: {e}")
 
-    # ------------------------------------------------------------------
-    # Deletion
-    # ------------------------------------------------------------------
     @mcp.tool()
     def board_remove_items_by_id(item_ids: list[str]) -> MutationResult:
         """
@@ -416,9 +379,6 @@ def register_board_types_tools(mcp: MCPServer) -> None:
             board.drop_commit(commit)
             return MutationResult(success=False, message=f"Remove failed: {e}")
 
-    # ------------------------------------------------------------------
-    # Zone helpers
-    # ------------------------------------------------------------------
     @mcp.tool()
     def board_list_zones_detailed(limit: int = 20) -> list[dict[str, Any]]:
         """

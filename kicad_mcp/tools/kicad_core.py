@@ -1,26 +1,16 @@
-# kicad_mcp/tools/kicad_core.py
-"""
-MCP tools derived from kipy.KiCad (the top-level connection class).
-
-These tools manage connection health, document discovery, and basic
-headless document control. Board/Schematic-specific operations come later.
-"""
-
 from __future__ import annotations
 
-from enum import Enum
 from typing import Any, Optional
 
 from mcp.server import MCPServer
 from pydantic import BaseModel, Field
 
-# Assume you have a shared connection manager (shown at the bottom)
 from kicad_mcp.connection import get_kicad
-
-
-# ---------------------------------------------------------------------------
-# Shared response models (clean, serialisable)
-# ---------------------------------------------------------------------------
+from kicad_mcp.helpers.documents import (
+    document_path,
+    pcb_and_schematic_types,
+    specifier_to_dict,
+)
 
 class KiCadStatus(BaseModel):
     connected: bool
@@ -30,31 +20,21 @@ class KiCadStatus(BaseModel):
     version_match: Optional[bool] = None
     message: str
 
-
 class DocumentInfo(BaseModel):
     path: Optional[str] = None
     type: Optional[str] = None
-    # Add more fields later once we inspect DocumentSpecifier fully
     raw: dict[str, Any] = Field(default_factory=dict)
-
+    message: str = ""
 
 class BoardSummary(BaseModel):
     available: bool
     message: str
-    # We will expand this significantly in the Board section
-
 
 class SchematicSummary(BaseModel):
     available: bool
     message: str
 
-
-# ---------------------------------------------------------------------------
-# Tools
-# ---------------------------------------------------------------------------
-
 def register_kicad_core_tools(mcp: MCPServer) -> None:
-    """Register all tools that come from the top-level KiCad class."""
 
     @mcp.tool()
     def kicad_get_status() -> KiCadStatus:
@@ -101,21 +81,10 @@ def register_kicad_core_tools(mcp: MCPServer) -> None:
         """
         kicad = get_kicad()
 
-        types_to_try: list[int] = []
         if doc_type is not None and doc_type != 0:
             types_to_try = [doc_type]
         else:
-            # Discover official enum values when available; fall back to PCB=2, SCH=1
-            try:
-                from kipy.proto.common.types.base_types_pb2 import DocumentType
-                for name in ("DOCTYPE_PCB", "DOCTYPE_SCHEMATIC", "DOCTYPE_PROJECT"):
-                    if hasattr(DocumentType, name):
-                        types_to_try.append(int(getattr(DocumentType, name)))
-            except Exception:
-                types_to_try = [2, 1]  # typical PCB, schematic
-
-            if not types_to_try:
-                types_to_try = [2, 1]
+            types_to_try = pcb_and_schematic_types()
 
         result: list[DocumentInfo] = []
         errors: list[str] = []
@@ -132,9 +101,12 @@ def register_kicad_core_tools(mcp: MCPServer) -> None:
                 if key in seen:
                     continue
                 seen.add(key)
+                raw = specifier_to_dict(doc, dtype)
                 result.append(
                     DocumentInfo(
-                        raw={"type": dtype, "specifier": key},
+                        path=document_path(doc),
+                        type=str(raw.get("type_name") or raw.get("type") or dtype),
+                        raw=raw,
                     )
                 )
 
@@ -202,34 +174,46 @@ def register_kicad_core_tools(mcp: MCPServer) -> None:
         """
         Open a document in headless mode.
 
-        Only supported when connected to a headless kicad-cli api-server.
-        Not supported against a normal GUI KiCad instance.
-
-        Parameters
-        ----------
-        path:
-            Absolute path to the board, schematic, or project file.
-        doc_type:
-            Document type integer (board / schematic / etc.).
+        KiCad 9/10 GUI sessions do not support this. Headless open via
+        kicad-cli api-server is KiCad 11+. Open the file in the KiCad GUI instead.
         """
         kicad = get_kicad()
+        if not hasattr(kicad, "open_document"):
+            return DocumentInfo(
+                path=path,
+                type=str(doc_type),
+                raw={"unsupported": True, "path": path, "type": doc_type},
+                message=(
+                    "Opening documents via IPC requires KiCad 11 headless mode "
+                    "(kicad-cli api-server). This KiCad 10 / kicad-python session "
+                    "does not implement open_document. Open the file in the GUI."
+                ),
+            )
         doc = kicad.open_document(path, doc_type)
-        return DocumentInfo(raw={"path": path, "type": doc_type, "specifier": str(doc)})
+        return DocumentInfo(
+            path=path,
+            type=str(doc_type),
+            raw={"path": path, "type": doc_type, "specifier": str(doc)},
+            message="Document opened.",
+        )
 
     @mcp.tool()
     def kicad_close_document(document_raw: dict[str, Any]) -> str:
         """
-        Close an open document (headless mode only).
+        Close an open document (headless / KiCad 11+ only).
 
-        Pass the document information previously returned by
-        kicad_list_open_documents or kicad_open_document.
+        Not supported against a normal KiCad 10 GUI instance.
         """
         kicad = get_kicad()
-        # In real code you would reconstruct a proper DocumentSpecifier here.
-        # For now we keep the interface honest about the current limitation.
+        if not hasattr(kicad, "close_document"):
+            return (
+                "Closing documents via IPC requires KiCad 11 headless mode. "
+                "This KiCad 10 / kicad-python session does not implement "
+                "close_document. Close the file in the GUI."
+            )
         raise NotImplementedError(
-            "Reconstructing DocumentSpecifier from serialized form needs the "
-            "exact protobuf fields. Will be completed once Common Types are reviewed."
+            "Reconstructing DocumentSpecifier from serialized form is not "
+            "implemented. Close the file in the KiCad GUI."
         )
 
     @mcp.tool()
@@ -243,7 +227,8 @@ def register_kicad_core_tools(mcp: MCPServer) -> None:
         Parameters
         ----------
         identifier:
-            Full plugin identifier, e.g. "org.kicad.my-mcp-server"
+            Reverse-DNS plugin identifier, e.g. "org.kicad.kicad-mcp".
+            A bare string like "test" is rejected by KiCad.
         """
         kicad = get_kicad()
         return kicad.get_plugin_settings_path(identifier)
@@ -258,20 +243,3 @@ def register_kicad_core_tools(mcp: MCPServer) -> None:
         """
         kicad = get_kicad()
         return kicad.get_kicad_binary_path(binary_name)
-
-
-# ---------------------------------------------------------------------------
-# Minimal connection manager (put in kicad_mcp/connection.py)
-# ---------------------------------------------------------------------------
-
-"""
-# kicad_mcp/connection.py
-from __future__ import annotations
-from functools import lru_cache
-from kipy import KiCad
-
-@lru_cache(maxsize=1)
-def get_kicad() -> KiCad:
-    # You can later make this configurable (socket, headless, etc.)
-    return KiCad()
-"""
