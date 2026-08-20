@@ -1,8 +1,5 @@
-# kicad_mcp/helpers/units.py
-"""Unit conversion helpers. KiCad IPC API uses nanometers everywhere."""
-
 NM_PER_MM = 1_000_000
-NM_PER_MIL = 25_400  # 1 mil = 0.0254 mm = 25400 nm
+NM_PER_MIL = 25_400
 
 
 def mm_to_nm(mm: float) -> int:

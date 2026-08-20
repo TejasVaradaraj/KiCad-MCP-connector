@@ -1,53 +1,77 @@
-# kicad_mcp/connection.py
-"""
-KiCad IPC connection manager.
-
-Owns the single shared `kipy.KiCad` client used by all tools.
-Connection is created lazily on first use and cached for the lifetime
-of the process (typical for stdio MCP servers).
-"""
-
 from __future__ import annotations
 
 import logging
 import os
 from functools import lru_cache
+from pathlib import Path
+from tempfile import gettempdir
 from typing import Optional
 
 logger = logging.getLogger("kicad-mcp.connection")
 
-# ---------------------------------------------------------------------------
-# Configuration (override via environment variables if desired)
-# ---------------------------------------------------------------------------
-
-# Optional explicit socket path. If unset, kicad-python uses
-# KICAD_API_SOCKET or the platform default.
 KICAD_SOCKET_PATH: Optional[str] = os.environ.get("KICAD_MCP_SOCKET")
-
-# Optional token. If unset, kicad-python uses KICAD_API_TOKEN.
 KICAD_TOKEN: Optional[str] = os.environ.get("KICAD_MCP_TOKEN")
-
-# Client name shown in KiCad / logs.
 CLIENT_NAME: str = os.environ.get("KICAD_MCP_CLIENT_NAME", "kicad-mcp")
-
-# Request timeout in milliseconds.
 TIMEOUT_MS: int = int(os.environ.get("KICAD_MCP_TIMEOUT_MS", "5000"))
-
-# Headless mode (kicad-cli api-server). Default is normal GUI connection.
 HEADLESS: bool = os.environ.get("KICAD_MCP_HEADLESS", "").lower() in ("1", "true", "yes")
-
-# Optional path to kicad-cli binary (only needed for headless in some setups).
 KICAD_CLI_PATH: Optional[str] = os.environ.get("KICAD_MCP_CLI_PATH")
-
-# Optional file to pre-load when starting headless.
 HEADLESS_FILE_PATH: Optional[str] = os.environ.get("KICAD_MCP_FILE")
 
 
 class KiCadConnectionError(RuntimeError):
-    """Raised when we cannot establish or use a KiCad connection."""
+    pass
+
+
+def _nng_url(path: str) -> str:
+    path = path.strip()
+    if path.startswith(("ipc://", "tcp://")):
+        return path
+    return f"ipc://{path}"
+
+
+def _socket_candidates() -> list[str]:
+    explicit = KICAD_SOCKET_PATH or os.environ.get("KICAD_API_SOCKET")
+    if explicit:
+        return [_nng_url(explicit)]
+
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def add(url: str) -> None:
+        if url not in seen:
+            seen.add(url)
+            found.append(url)
+
+    for directory in (Path("/tmp/kicad"), Path(gettempdir()) / "kicad"):
+        if not directory.is_dir():
+            continue
+        default = directory / "api.sock"
+        if default.exists():
+            add(_nng_url(str(default)))
+        pid_socks = sorted(
+            directory.glob("api-*.sock"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for sock in pid_socks:
+            add(_nng_url(str(sock)))
+
+    add("ipc:///tmp/kicad/api.sock")
+    return found
+
+
+def _close_quietly(kicad) -> None:
+    for method in ("close", "disconnect"):
+        fn = getattr(kicad, method, None)
+        if callable(fn):
+            try:
+                fn()
+            except Exception:
+                pass
+            return
+
 
 def _create_kicad():
-    """Create a new KiCad client instance from current config."""
     try:
         from kipy import KiCad
     except ImportError as e:
@@ -57,69 +81,56 @@ def _create_kicad():
 
     import inspect
 
-    wanted = {
-        "client_name": CLIENT_NAME,
-        "timeout_ms": TIMEOUT_MS,
-        "headless": HEADLESS,
-        "socket_path": KICAD_SOCKET_PATH,
-        "kicad_token": KICAD_TOKEN,
-        "kicad_cli_path": KICAD_CLI_PATH,
-        "file_path": HEADLESS_FILE_PATH if HEADLESS else None,
-    }
-
     params = inspect.signature(KiCad.__init__).parameters
-    kwargs = {
-        key: value
-        for key, value in wanted.items()
-        if value is not None and key in params
-    }
+    sockets = _socket_candidates() if "socket_path" in params else [None]
+    errors: list[str] = []
 
-    logger.info("Connecting to KiCad with kwargs=%s", list(kwargs))
-
-    try:
-        kicad = KiCad(**kwargs)
-    except Exception as e:
-        raise KiCadConnectionError(
-            f"Failed to connect to KiCad: {e}. "
-            "Ensure KiCad is running with the API enabled "
-            "(Preferences → Plugins → Enable API server)."
-        ) from e
-
-    try:
-        kicad.ping()
-    except Exception as e:
+    for socket_path in sockets:
+        wanted = {
+            "client_name": CLIENT_NAME,
+            "timeout_ms": TIMEOUT_MS,
+            "headless": HEADLESS,
+            "socket_path": socket_path,
+            "kicad_token": KICAD_TOKEN,
+            "kicad_cli_path": KICAD_CLI_PATH,
+            "file_path": HEADLESS_FILE_PATH if HEADLESS else None,
+        }
+        kwargs = {
+            key: value
+            for key, value in wanted.items()
+            if value is not None and key in params
+        }
+        logger.info("Connecting to KiCad with kwargs=%s", list(kwargs))
+        kicad = None
         try:
-            kicad.close()
-        except Exception:
-            pass
-        raise KiCadConnectionError(
-            f"Connected but ping failed: {e}."
-        ) from e
+            kicad = KiCad(**kwargs)
+            kicad.ping()
+        except Exception as e:
+            errors.append(f"{socket_path or 'default'}: {e}")
+            if kicad is not None:
+                _close_quietly(kicad)
+            continue
 
-    logger.info("KiCad connection established.")
-    return kicad
+        logger.info("KiCad connection established via %s", socket_path or "default")
+        return kicad
+
+    tried = ", ".join(s or "default" for s in sockets)
+    detail = "; ".join(errors) or "no sockets attempted"
+    raise KiCadConnectionError(
+        f"Failed to connect to KiCad. Tried: {tried}. {detail}. "
+        "Turn on Preferences → Plugins → Enable KiCad API. "
+        "The Python interpreter in that dialog is for plugins, not this server."
+    )
 
 
 @lru_cache(maxsize=1)
 def get_kicad():
-    """
-    Return the shared KiCad client (lazy singleton).
-
-    First call creates the connection; subsequent calls reuse it.
-    Raises KiCadConnectionError on failure.
-    """
     return _create_kicad()
 
 
 def reset_connection() -> None:
-    """
-    Drop the cached connection so the next get_kicad() creates a new one.
-
-    Useful after KiCad restarts or when switching between GUI / headless.
-    """
     client = None
     try:
-        # Peek at the cache without creating a new connection.
         if get_kicad.cache_info().hits + get_kicad.cache_info().misses > 0:
             try:
                 client = get_kicad()
@@ -139,20 +150,14 @@ def reset_connection() -> None:
 
 
 def close_connection() -> None:
-    """Explicitly close and clear the connection (e.g. on server shutdown)."""
     reset_connection()
 
 
 def get_board_or_raise():
-    """
-    Convenience helper used by many tools:
-    return the open board or raise a clear error.
-    """
     kicad = get_kicad()
     board = kicad.get_board()
     if board is None:
         raise KiCadConnectionError(
-            "No board is currently open in KiCad. "
-            "Open a .kicad_pcb file first."
+            "No board is currently open in KiCad. Open a .kicad_pcb first."
         )
     return board
