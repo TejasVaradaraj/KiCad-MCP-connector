@@ -7,7 +7,11 @@ __pycache__/
 dist/
 *.egg-info/
 .DS_Store
-kicad_mcp/logs/
-kicad_mcp/tests/
 logs/
-src/
+kicad_mcp/logs/
+remote/.env
+remote/.public_url
+*.lck
+fp-info-cache
+*-backups/
+tests/fixtures/demo/Custom-Keyboard-Design/
