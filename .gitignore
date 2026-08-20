@@ -8,3 +8,6 @@ dist/
 *.egg-info/
 .DS_Store
 kicad_mcp/logs/
+kicad_mcp/tests/
+logs/
+src/
